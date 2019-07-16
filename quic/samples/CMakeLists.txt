@@ -1,11 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
-if(NOT BUILD_TESTS)
-  return()
-endif()
+cmake_minimum_required(VERSION 3.10)
 
 file(
   GLOB_RECURSE QUIC_API_HEADERS_TOINSTALL
@@ -18,18 +11,18 @@ foreach(header ${QUIC_API_HEADERS_TOINSTALL})
   install(FILES ${header} DESTINATION include/quic/samples/${header_dir})
 endforeach()
 
-add_executable(echo echo/main.cpp)
+add_executable(mvfst-demo demo/mvfst_demo.cpp)
 
 target_compile_options(
-  echo
+        mvfst-demo
   PRIVATE
   ${_QUIC_COMMON_COMPILE_OPTIONS}
 )
 
-add_dependencies(echo googletest)
+add_dependencies(mvfst-demo googletest)
 
 target_link_libraries(
-  echo PUBLIC
+        mvfst-demo PUBLIC
   mvfst_test_utils
   ${GFLAGS_LIBRARIES}
   ${LIBGMOCK_LIBRARIES}

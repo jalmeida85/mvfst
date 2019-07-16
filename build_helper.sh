@@ -82,10 +82,10 @@ fi
 # just use the default of 4 (e.g., some desktop/laptop OSs
 # have a tendency to freeze if we actually use all cores).
 set +x
-nproc=4
-if [ -z "$(hash nproc 2>&1)" ]; then
-    nproc=$(nproc)
-fi
+nproc=1
+#if [ -z "$(hash nproc 2>&1)" ]; then
+#    nproc=$(nproc)
+#fi
 set -x
 
 function install_dependencies_linux() {
@@ -183,7 +183,7 @@ function setup_folly() {
       -DFOLLY_USE_JEMALLOC=0                        \
       ..
   fi
-  make -j "$nproc"
+  make -j 1
   make install
   echo -e "${COLOR_GREEN}Folly is installed ${COLOR_OFF}"
   cd "$BWD" || exit
@@ -205,7 +205,7 @@ function setup_fizz() {
     -DCMAKE_PREFIX_PATH="$FIZZ_INSTALL_DIR"     \
     -DCMAKE_INSTALL_PREFIX="$FIZZ_INSTALL_DIR"  \
     "$FIZZ_DIR/fizz"
-  make -j "$nproc"
+  make -j 1
   make install
   echo -e "${COLOR_GREEN}Fizz is installed ${COLOR_OFF}"
   cd "$BWD" || exit
@@ -222,8 +222,8 @@ function detect_platform() {
 }
 
 detect_platform
-setup_folly
-setup_fizz
+# setup_folly
+# setup_fizz
 
 # build mvfst:
 cd "$MVFST_BUILD_DIR" || exit
@@ -232,6 +232,6 @@ cmake -DCMAKE_PREFIX_PATH="$FOLLY_INSTALL_DIR"    \
  -DCMAKE_BUILD_TYPE=RelWithDebInfo                \
  -DBUILD_TESTS=On                                 \
   ../..
-make -j "$nproc"
+make -j 1
 echo -e "${COLOR_GREEN}MVFST build is complete. To run unit test: \
   cd _build/build && make test ${COLOR_OFF}"
