@@ -19,6 +19,9 @@ DEFINE_string(host, "::1", "Server hostname/IP");
 DEFINE_int32(port, 6668, "Server port");
 DEFINE_string(mode, "server", "Mode to run in: 'client' or 'server'");
 DEFINE_bool(pr, false, "Enable partially reliable mode");
+DEFINE_string(bytes, "50000", "Bytes requested");
+DEFINE_string(lat, "0", "Server latency");
+DEFINE_string(plr, "0.0", "Server packet loss rate");
 
 using namespace quic::samples;
 
@@ -40,7 +43,7 @@ int main(int argc, char* argv[]) {
 			LOG(ERROR) << "FileTransfer expected --host and --port";
 			return -2;
 		}
-		DemoClient client(argv[1], argv[2], argv[3], FLAGS_host, FLAGS_port, FLAGS_pr);
+		DemoClient client(FLAGS_lat, FLAGS_plr, FLAGS_bytes, FLAGS_host, FLAGS_port, FLAGS_pr);
 		client.start();
 	} else {
 		LOG(ERROR) << "Unknown mode specified: " << FLAGS_mode;
