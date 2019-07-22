@@ -172,8 +172,9 @@ enum class QuicNodeType : bool {
 
 enum class QuicVersion : uint32_t {
   VERSION_NEGOTIATION = 0x00000000,
-  MVFST = 0xfaceb000,
-  QUIC_DRAFT = 0xFF000014, // Draft-20
+  MVFST_OLD = 0xfaceb000,
+  MVFST = 0xfaceb001,
+  QUIC_DRAFT = 0xFF000016, // Draft-22
   MVFST_INVALID = 0xfaceb00f,
 };
 
@@ -389,6 +390,32 @@ inline std::ostream& operator<<(std::ostream& os, const QuicVersion& v) {
   os << static_cast<std::underlying_type<QuicVersion>::type>(v);
   return os;
 }
+
+enum class WriteDataReason {
+  NO_WRITE,
+  PROBES,
+  ACK,
+  CRYPTO_STREAM,
+  STREAM,
+  LOSS,
+  BLOCKED,
+  STREAM_WINDOW_UPDATE,
+  CONN_WINDOW_UPDATE,
+  SIMPLE,
+  RESET,
+  PATHCHALLENGE,
+};
+
+enum class NoWriteReason {
+  WRITE_OK,
+  EMPTY_SCHEDULER,
+  NO_FRAME,
+  NO_BODY,
+  SOCKET_FAILURE,
+};
+
+std::string writeDataReasonString(WriteDataReason reason);
+std::string writeNoWriteReasonString(NoWriteReason reason);
 
 /**
  * Filter the versions that are currently supported.

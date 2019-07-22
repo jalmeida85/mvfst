@@ -449,7 +449,7 @@ TEST_P(QuicClientTransportIntegrationTest, TLSAlert) {
         EXPECT_EQ(indices.size(), 1);
         auto tmp = std::move(qLogger->logs[indices[0]]);
         auto event = dynamic_cast<QLogTransportSummaryEvent*>(tmp.get());
-        checkTransportSummaryEvent(event);
+        this->checkTransportSummaryEvent(event);
 
         eventbase_.terminateLoopSoon();
       }));
@@ -480,7 +480,7 @@ TEST_P(QuicClientTransportIntegrationTest, BadServerTest) {
         EXPECT_EQ(indices.size(), 1);
         auto tmp = std::move(qLogger->logs[indices[0]]);
         auto event = dynamic_cast<QLogTransportSummaryEvent*>(tmp.get());
-        checkTransportSummaryEvent(event);
+        this->checkTransportSummaryEvent(event);
       }));
   client->start(&clientConnCallback);
   eventbase_.loop();
@@ -515,9 +515,16 @@ TEST_P(QuicClientTransportIntegrationTest, TestZeroRttSuccess) {
   // Change the ctx
   server_->setFizzContext(serverCtx);
   folly::Optional<std::string> alpn = std::string("h1q-fb");
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(alpn, _))
-      .WillOnce(Return(true));
+  bool performedValidation = false;
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>& alpnToValidate, const Buf&) {
+        performedValidation = true;
+        EXPECT_EQ(alpnToValidate, alpn);
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   client->start(&clientConnCallback);
+  EXPECT_TRUE(performedValidation);
   CHECK(client->getConn().zeroRttWriteCipher);
   EXPECT_TRUE(client->serverInitialParamsSet());
   EXPECT_EQ(
@@ -548,11 +555,7 @@ TEST_P(QuicClientTransportIntegrationTest, TestZeroRttSuccess) {
   expected->prependChain(data->clone());
   EXPECT_CALL(clientConnCallback, onReplaySafe());
   sendRequestAndResponseAndWait(*expected, data->clone(), streamId, &readCb);
-  if (getVersion() == QuicVersion::MVFST) {
-    EXPECT_TRUE(client->getConn().zeroRttWriteCipher);
-  } else {
-    EXPECT_FALSE(client->getConn().zeroRttWriteCipher);
-  }
+  EXPECT_TRUE(client->getConn().zeroRttWriteCipher);
 }
 
 TEST_P(QuicClientTransportIntegrationTest, TestZeroRttRejection) {
@@ -561,9 +564,15 @@ TEST_P(QuicClientTransportIntegrationTest, TestZeroRttRejection) {
   pskCache_->putPsk(hostname, cachedPsk);
   // Change the ctx
   server_->setFizzContext(serverCtx);
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _))
-      .WillOnce(Return(true));
+  bool performedValidation = false;
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        performedValidation = true;
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   client->start(&clientConnCallback);
+  EXPECT_TRUE(performedValidation);
   CHECK(client->getConn().zeroRttWriteCipher);
   EXPECT_TRUE(client->serverInitialParamsSet());
   EXPECT_EQ(
@@ -620,7 +629,12 @@ TEST_P(QuicClientTransportIntegrationTest, TestZeroRttVersionDoesNotMatch) {
   // This needs to be a version that's not in getVersion() but in server's
   // supported version list.
   client->getNonConstConn().originalVersion = MVFST1;
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _)).Times(0);
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        EXPECT_TRUE(false);
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   client->start(&clientConnCallback);
   EXPECT_EQ(client->getConn().zeroRttWriteCipher, nullptr);
   EXPECT_FALSE(client->serverInitialParamsSet());
@@ -658,7 +672,12 @@ TEST_P(QuicClientTransportIntegrationTest, TestZeroRttNotAttempted) {
   // Change the ctx
   server_->setFizzContext(serverCtx);
   client->getNonConstConn().transportSettings.attemptEarlyData = false;
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _)).Times(0);
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        EXPECT_TRUE(false);
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   client->start(&clientConnCallback);
 
   EXPECT_CALL(clientConnCallback, onTransportReady()).WillOnce(Invoke([&] {
@@ -693,9 +712,15 @@ TEST_P(QuicClientTransportIntegrationTest, TestZeroRttInvalidAppParams) {
   pskCache_->putPsk(hostname, cachedPsk);
   // Change the ctx
   server_->setFizzContext(serverCtx);
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _))
-      .WillOnce(Return(false));
+  bool performedValidation = false;
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        performedValidation = true;
+        return false;
+      },
+      []() -> Buf { return nullptr; });
   client->start(&clientConnCallback);
+  EXPECT_TRUE(performedValidation);
 
   EXPECT_CALL(clientConnCallback, onTransportReady()).WillOnce(Invoke([&] {
     EXPECT_FALSE(client->getConn().zeroRttWriteCipher);
@@ -1019,7 +1044,10 @@ TEST_P(
 INSTANTIATE_TEST_CASE_P(
     QuicClientTransportIntegrationTests,
     QuicClientTransportIntegrationTest,
-    ::testing::Values(QuicVersion::MVFST, QuicVersion::QUIC_DRAFT));
+    ::testing::Values(
+        QuicVersion::MVFST,
+        QuicVersion::MVFST_OLD,
+        QuicVersion::QUIC_DRAFT));
 
 // Simulates a simple 1rtt handshake without needing to get any handshake bytes
 // from the server.
@@ -1070,7 +1098,7 @@ class FakeOneRttHandshakeLayer : public ClientHandshake {
     parameters.push_back(encodeIntegerParameter(
         TransportParameterId::max_packet_size, maxRecvPacketSize));
     ServerTransportParameters params;
-    params.negotiated_version = negotiatedVersion;
+    params.negotiated_version = folly::none;
     params.supported_versions = {QuicVersion::MVFST, QuicVersion::QUIC_DRAFT};
 
     StatelessResetToken testStatelessResetToken = generateStatelessResetToken();
@@ -1490,9 +1518,13 @@ class QuicClientTransportTest : public Test {
     auto codec = std::make_unique<QuicReadCodec>(QuicNodeType::Server);
     codec->setClientConnectionId(*originalConnId);
     codec->setInitialReadCipher(getClientInitialCipher(
-        &fizzFactory, *client->getConn().initialDestinationConnectionId));
+        &fizzFactory,
+        *client->getConn().initialDestinationConnectionId,
+        QuicVersion::MVFST));
     codec->setInitialHeaderCipher(makeClientInitialHeaderCipher(
-        &fizzFactory, *client->getConn().initialDestinationConnectionId));
+        &fizzFactory,
+        *client->getConn().initialDestinationConnectionId,
+        QuicVersion::MVFST));
     codec->setHandshakeReadCipher(test::createNoOpAead());
     codec->setHandshakeHeaderCipher(test::createNoOpHeaderCipher());
     return codec;
@@ -1510,9 +1542,13 @@ class QuicClientTransportTest : public Test {
     codec->setZeroRttHeaderCipher(test::createNoOpHeaderCipher());
     if (handshakeCipher) {
       codec->setInitialReadCipher(getClientInitialCipher(
-          &fizzFactory, *client->getConn().initialDestinationConnectionId));
+          &fizzFactory,
+          *client->getConn().initialDestinationConnectionId,
+          QuicVersion::MVFST));
       codec->setInitialHeaderCipher(makeClientInitialHeaderCipher(
-          &fizzFactory, *client->getConn().initialDestinationConnectionId));
+          &fizzFactory,
+          *client->getConn().initialDestinationConnectionId,
+          QuicVersion::MVFST));
       codec->setHandshakeReadCipher(test::createNoOpAead());
       codec->setHandshakeHeaderCipher(test::createNoOpHeaderCipher());
     }
@@ -2477,6 +2513,8 @@ TEST_F(QuicClientTransportAfterStartTest, ReadStream) {
 
 TEST_F(QuicClientTransportAfterStartTest, ReadStreamCoalesced) {
   StreamId streamId = client->createBidirectionalStream().value();
+  auto qLogger = std::make_shared<FileQLogger>();
+  client->getNonConstConn().qLogger = qLogger;
 
   client->setReadCallback(streamId, &readCb);
   bool dataDelivered = false;
@@ -2493,8 +2531,8 @@ TEST_F(QuicClientTransportAfterStartTest, ReadStreamCoalesced) {
 
   QuicFizzFactory fizzFactory;
   auto garbage = IOBuf::copyBuffer("garbage");
-  auto initialCipher =
-      getServerInitialCipher(&fizzFactory, *serverChosenConnId);
+  auto initialCipher = getServerInitialCipher(
+      &fizzFactory, *serverChosenConnId, QuicVersion::MVFST);
   auto firstPacketNum = appDataPacketNum++;
   auto packet1 = packetToBufCleartext(
       createStreamPacket(
@@ -2525,6 +2563,13 @@ TEST_F(QuicClientTransportAfterStartTest, ReadStreamCoalesced) {
   }
   EXPECT_TRUE(dataDelivered);
   client->close(folly::none);
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 81);
+  EXPECT_EQ(event->dropReason, kParse.str());
 }
 
 TEST_F(QuicClientTransportAfterStartTest, ReadStreamCoalescedMany) {
@@ -2537,8 +2582,8 @@ TEST_F(QuicClientTransportAfterStartTest, ReadStreamCoalescedMany) {
   IOBufQueue packets{IOBufQueue::cacheChainLength()};
   for (int i = 0; i < kMaxNumCoalescedPackets; i++) {
     auto garbage = IOBuf::copyBuffer("garbage");
-    auto initialCipher =
-        getServerInitialCipher(&fizzFactory, *serverChosenConnId);
+    auto initialCipher = getServerInitialCipher(
+        &fizzFactory, *serverChosenConnId, QuicVersion::MVFST);
     auto packetNum = appDataPacketNum++;
     auto packet1 = packetToBufCleartext(
         createStreamPacket(
@@ -3069,6 +3114,8 @@ TEST_F(QuicClientTransportAfterStartTest, IdleTimerNotResetOnDuplicatePacket) {
 }
 
 TEST_P(QuicClientTransportAfterStartTestClose, TimeoutsNotSetAfterClose) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  client->getNonConstConn().qLogger = qLogger;
   StreamId streamId = client->createBidirectionalStream().value();
 
   auto expected = IOBuf::copyBuffer("hello");
@@ -3096,6 +3143,14 @@ TEST_P(QuicClientTransportAfterStartTestClose, TimeoutsNotSetAfterClose) {
   ASSERT_FALSE(client->lossTimeout().isScheduled());
   ASSERT_FALSE(client->ackTimeout().isScheduled());
   ASSERT_TRUE(client->drainTimeout().isScheduled());
+
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 0);
+  EXPECT_EQ(event->dropReason, kAlreadyClosed.str());
 }
 
 TEST_F(QuicClientTransportAfterStartTest, IdleTimerNotResetOnWritingOldData) {
@@ -3161,6 +3216,8 @@ TEST_F(QuicClientTransportAfterStartTest, IdleTimeoutExpired) {
 }
 
 TEST_F(QuicClientTransportAfterStartTest, RecvDataAfterIdleTimeout) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  client->getNonConstConn().qLogger = qLogger;
   EXPECT_CALL(*sock, close());
   client->idleTimeout().timeoutExpired();
 
@@ -3178,6 +3235,13 @@ TEST_F(QuicClientTransportAfterStartTest, RecvDataAfterIdleTimeout) {
   deliverData(packet->coalesce());
   EXPECT_TRUE(verifyFramePresent<ConnectionCloseFrame>(
       socketWrites, *makeEncryptedCodec(true)));
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 0);
+  EXPECT_EQ(event->dropReason, kAlreadyClosed.str());
 }
 
 TEST_F(QuicClientTransportAfterStartTest, InvalidStream) {
@@ -3203,8 +3267,8 @@ TEST_F(QuicClientTransportAfterStartTest, WrongCleartextCipher) {
   // throws on getting unencrypted stream data.
   PacketNum nextPacketNum = appDataPacketNum++;
 
-  auto initialCipher =
-      getServerInitialCipher(&fizzFactory, *serverChosenConnId);
+  auto initialCipher = getServerInitialCipher(
+      &fizzFactory, *serverChosenConnId, QuicVersion::MVFST);
   auto packet = packetToBufCleartext(
       createStreamPacket(
           *serverChosenConnId /* src */,
@@ -3537,6 +3601,9 @@ TEST_F(QuicClientTransportAfterStartTest, BadStatelessResetWontCloseTransport) {
 
 TEST_F(QuicClientTransportVersionAndRetryTest, RetryPacket) {
   // Create a stream and attempt to send some data to the server
+  auto qLogger = std::make_shared<FileQLogger>();
+  client->getNonConstConn().qLogger = qLogger;
+
   StreamId streamId = *client->createBidirectionalStream();
   auto write = IOBuf::copyBuffer("ice cream");
   client->writeChain(streamId, write->clone(), true, false, nullptr);
@@ -3586,6 +3653,14 @@ TEST_F(QuicClientTransportVersionAndRetryTest, RetryPacket) {
   auto quicPacket = boost::get<QuicPacket>(&codecResult);
   auto regularQuicPacket = boost::get<RegularQuicPacket>(quicPacket);
   auto header = boost::get<LongHeader>(regularQuicPacket->header);
+
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketReceived, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketEvent*>(tmp.get());
+  EXPECT_EQ(event->packetType, toString(LongHeader::Types::Retry));
+
   EXPECT_EQ(header.getHeaderType(), LongHeader::Types::Initial);
   EXPECT_TRUE(header.hasToken());
   folly::IOBufEqualTo eq;
@@ -3716,8 +3791,6 @@ Buf getHandshakePacketWithFrame(
 
 TEST_F(QuicClientTransportVersionAndRetryTest, FrameNotAllowed) {
   StreamId streamId = *client->createBidirectionalStream();
-  auto data = IOBuf::copyBuffer("data");
-
   auto clientConnectionId = *client->getConn().clientConnectionId;
   auto serverConnId = *serverChosenConnId;
   serverConnId.data()[0] = ~serverConnId.data()[0];
@@ -4204,9 +4277,10 @@ class QuicClientTransportPskCacheTest
 };
 
 TEST_F(QuicClientTransportPskCacheTest, TestOnNewCachedPsk) {
-  std::string appParams = "QPACK params";
-  EXPECT_CALL(clientConnCallback, serializeEarlyDataAppParams())
-      .WillOnce(Invoke([=]() { return folly::IOBuf::copyBuffer(appParams); }));
+  std::string appParams = "APP params";
+  client->setEarlyDataAppParamsFunctions(
+      [](const folly::Optional<std::string>&, const Buf&) { return true; },
+      [=]() -> Buf { return folly::IOBuf::copyBuffer(appParams); });
   EXPECT_CALL(*mockPskCache_, putPsk(hostname_, _))
       .WillOnce(Invoke([=](const std::string&, QuicCachedPsk psk) {
         EXPECT_EQ(psk.appParams, appParams);
@@ -4215,9 +4289,10 @@ TEST_F(QuicClientTransportPskCacheTest, TestOnNewCachedPsk) {
 }
 
 TEST_F(QuicClientTransportPskCacheTest, TestTwoOnNewCachedPsk) {
-  std::string appParams1 = "QPACK params1";
-  EXPECT_CALL(clientConnCallback, serializeEarlyDataAppParams())
-      .WillOnce(Invoke([=]() { return folly::IOBuf::copyBuffer(appParams1); }));
+  std::string appParams1 = "APP params1";
+  client->setEarlyDataAppParamsFunctions(
+      [](const folly::Optional<std::string>&, const Buf&) { return true; },
+      [=]() -> Buf { return folly::IOBuf::copyBuffer(appParams1); });
   EXPECT_CALL(*mockPskCache_, putPsk(hostname_, _))
       .WillOnce(Invoke([=](const std::string&, QuicCachedPsk psk) {
         auto& params = psk.transportParams;
@@ -4239,9 +4314,10 @@ TEST_F(QuicClientTransportPskCacheTest, TestTwoOnNewCachedPsk) {
   client->getNonConstConn()
       .flowControlState.peerAdvertisedInitialMaxStreamOffsetUni = 123;
 
-  std::string appParams2 = "QPACK params2";
-  EXPECT_CALL(clientConnCallback, serializeEarlyDataAppParams())
-      .WillOnce(Invoke([=]() { return folly::IOBuf::copyBuffer(appParams2); }));
+  std::string appParams2 = "APP params2";
+  client->setEarlyDataAppParamsFunctions(
+      [](const folly::Optional<std::string>&, const Buf&) { return true; },
+      [=]() -> Buf { return folly::IOBuf::copyBuffer(appParams2); });
   EXPECT_CALL(*mockPskCache_, putPsk(hostname_, _))
       .WillOnce(Invoke([=](const std::string&, QuicCachedPsk psk) {
         auto& params = psk.transportParams;
@@ -4344,8 +4420,15 @@ TEST_F(QuicZeroRttClientTest, TestReplaySafeCallback) {
             std::numeric_limits<uint32_t>::max();
         return quicCachedPsk;
       }));
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _));
+  bool performedValidation = false;
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        performedValidation = true;
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   startClient();
+  EXPECT_TRUE(performedValidation);
 
   auto initialUDPSendPacketLen = client->getConn().udpSendPacketLen;
   socketWrites.clear();
@@ -4408,8 +4491,15 @@ TEST_F(QuicZeroRttClientTest, TestZeroRttRejection) {
             std::numeric_limits<uint32_t>::max();
         return quicCachedPsk;
       }));
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _));
+  bool performedValidation = false;
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        performedValidation = true;
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   startClient();
+  EXPECT_TRUE(performedValidation);
 
   socketWrites.clear();
   auto streamId = client->createBidirectionalStream().value();
@@ -4453,8 +4543,15 @@ TEST_F(QuicZeroRttClientTest, TestZeroRttRejectionWithSmallerFlowControl) {
             std::numeric_limits<uint32_t>::max();
         return quicCachedPsk;
       }));
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _));
+  bool performedValidation = false;
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        performedValidation = true;
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   startClient();
+  EXPECT_TRUE(performedValidation);
 
   mockClientHandshake->maxInitialStreamData = 10;
   socketWrites.clear();
@@ -4491,8 +4588,15 @@ TEST_F(
             std::numeric_limits<uint32_t>::max();
         return quicCachedPsk;
       }));
-  EXPECT_CALL(clientConnCallback, validateEarlyDataAppParams(_, _));
+  bool performedValidation = false;
+  client->setEarlyDataAppParamsFunctions(
+      [&](const folly::Optional<std::string>&, const Buf&) {
+        performedValidation = true;
+        return true;
+      },
+      []() -> Buf { return nullptr; });
   startClient();
+  EXPECT_TRUE(performedValidation);
 
   EXPECT_TRUE(client->lossTimeout().isScheduled());
   auto timeRemaining1 = client->lossTimeout().getTimeRemaining();
@@ -4542,6 +4646,8 @@ class QuicProcessDataTest : public QuicClientTransportAfterStartTest {
 };
 
 TEST_F(QuicProcessDataTest, ProcessDataWithGarbageAtEnd) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  client->getNonConstConn().qLogger = qLogger;
   auto serverHello = IOBuf::copyBuffer("Fake SHLO");
   PacketNum nextPacketNum = initialPacketNum++;
   auto& aead = getInitialCipher();
@@ -4564,9 +4670,18 @@ TEST_F(QuicProcessDataTest, ProcessDataWithGarbageAtEnd) {
       kDefaultIdleTimeout,
       kDefaultAckDelayExponent,
       mockClientHandshake->maxRecvPacketSize);
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 10);
+  EXPECT_EQ(event->dropReason, kParse.str());
 }
 
 TEST_F(QuicProcessDataTest, ProcessDataHeaderOnly) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  client->getNonConstConn().qLogger = qLogger;
   auto serverHello = IOBuf::copyBuffer("Fake SHLO");
   PacketNum nextPacketNum = initialPacketNum++;
   auto& aead = getInitialCipher();
@@ -4587,6 +4702,13 @@ TEST_F(QuicProcessDataTest, ProcessDataHeaderOnly) {
       getAckState(client->getConn(), PacketNumberSpace::Handshake)
           .largestReceivedPacketNum,
       largestReceivedPacketNum);
+
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::DatagramReceived, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogDatagramReceivedEvent*>(tmp.get());
+  EXPECT_EQ(event->dataLen, 26);
 }
 
 TEST(AsyncUDPSocketTest, CloseMultipleTimes) {

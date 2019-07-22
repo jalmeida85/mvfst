@@ -32,6 +32,10 @@ using namespace folly;
 namespace quic {
 namespace test {
 
+namespace {
+using PacketDropReason = QuicTransportStatsCallback::PacketDropReason;
+} // namespace
+
 class FakeServerHandshake : public ServerHandshake {
  public:
   explicit FakeServerHandshake(
@@ -319,13 +323,13 @@ class QuicServerTransportTest : public Test {
   std::unique_ptr<Aead> getInitialCipher() {
     QuicFizzFactory fizzFactory;
     return getClientInitialCipher(
-        &fizzFactory, *initialDestinationConnectionId);
+        &fizzFactory, *initialDestinationConnectionId, QuicVersion::MVFST);
   }
 
   std::unique_ptr<PacketNumberCipher> getInitialHeaderCipher() {
     QuicFizzFactory fizzFactory;
     return makeClientInitialHeaderCipher(
-        &fizzFactory, *initialDestinationConnectionId);
+        &fizzFactory, *initialDestinationConnectionId, QuicVersion::MVFST);
   }
 
   Buf recvEncryptedStream(
@@ -403,16 +407,22 @@ class QuicServerTransportTest : public Test {
     QuicFizzFactory fizzFactory;
     clientReadCodec = std::make_unique<QuicReadCodec>(QuicNodeType::Client);
     clientReadCodec->setClientConnectionId(*clientConnectionId);
-    clientReadCodec->setInitialReadCipher(
-        getServerInitialCipher(&fizzFactory, *initialDestinationConnectionId));
+    clientReadCodec->setInitialReadCipher(getServerInitialCipher(
+        &fizzFactory, *initialDestinationConnectionId, QuicVersion::MVFST));
     clientReadCodec->setInitialHeaderCipher(makeServerInitialHeaderCipher(
-        &fizzFactory, *initialDestinationConnectionId));
+        &fizzFactory, *initialDestinationConnectionId, QuicVersion::MVFST));
     clientReadCodec->setCodecParameters(
-        CodecParameters(kDefaultAckDelayExponent));
+        CodecParameters(kDefaultAckDelayExponent, QuicVersion::MVFST));
   }
 
   virtual void expectWriteNewSessionTicket() {
-    EXPECT_CALL(connCallback, serializeEarlyDataAppParams()).Times(0);
+    server->setEarlyDataAppParamsFunctions(
+        [](const folly::Optional<std::string>&, const Buf&) { return false; },
+        []() -> Buf {
+          // This function shouldn't be called
+          EXPECT_TRUE(false);
+          return nullptr;
+        });
     EXPECT_CALL(*getFakeHandshakeLayer(), writeNewSessionTicket(_)).Times(0);
   }
 
@@ -571,11 +581,13 @@ class QuicServerTransportTest : public Test {
     readCodec->setHandshakeReadCipher(test::createNoOpAead());
     readCodec->setHandshakeHeaderCipher(test::createNoOpHeaderCipher());
     readCodec->setClientConnectionId(*clientConnectionId);
+    readCodec->setCodecParameters(
+        CodecParameters(kDefaultAckDelayExponent, QuicVersion::MVFST));
     if (handshakeCipher) {
       readCodec->setInitialReadCipher(getServerInitialCipher(
-          &fizzFactory, *initialDestinationConnectionId));
+          &fizzFactory, *initialDestinationConnectionId, QuicVersion::MVFST));
       readCodec->setInitialHeaderCipher(makeServerInitialHeaderCipher(
-          &fizzFactory, *initialDestinationConnectionId));
+          &fizzFactory, *initialDestinationConnectionId, QuicVersion::MVFST));
     }
     return readCodec;
   }
@@ -824,6 +836,8 @@ TEST_F(QuicServerTransportTest, TestCloseConnectionWithNoError) {
 }
 
 TEST_F(QuicServerTransportTest, TestClientAddressChanges) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  server->getNonConstConn().qLogger = qLogger;
   StreamId streamId = 4;
   clientAddr = folly::SocketAddress("127.0.0.1", 2000);
   auto data = IOBuf::copyBuffer("data");
@@ -831,6 +845,17 @@ TEST_F(QuicServerTransportTest, TestClientAddressChanges) {
       recvEncryptedStream(streamId, *data, 0, true), std::runtime_error);
   EXPECT_TRUE(verifyFramePresent<ConnectionCloseFrame>(
       serverWrites, *makeClientEncryptedCodec()));
+
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 29);
+  EXPECT_EQ(
+      event->dropReason,
+      QuicTransportStatsCallback::toString(
+          PacketDropReason::PEER_ADDRESS_CHANGE));
 }
 
 TEST_F(QuicServerTransportTest, TestCloseConnectionWithNoErrorPendingStreams) {
@@ -1198,7 +1223,8 @@ TEST_F(QuicServerTransportTest, RecvRstStreamFrame) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
 
   RstStreamFrame rstFrame(
       streamId,
@@ -1252,7 +1278,8 @@ TEST_F(QuicServerTransportTest, RecvStopSendingFrame) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
 
   StopSendingFrame stopSendingFrame(
       streamId, GenericApplicationErrorCode::UNKNOWN);
@@ -1372,7 +1399,8 @@ TEST_F(QuicServerTransportTest, RecvStopSendingFrameAfterHalfCloseRemote) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
 
   StopSendingFrame stopSendingFrame(
       streamId, GenericApplicationErrorCode::UNKNOWN);
@@ -1402,7 +1430,8 @@ TEST_F(QuicServerTransportTest, RecvStopSendingBeforeStream) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
 
   StopSendingFrame stopSendingFrame(
       streamId, GenericApplicationErrorCode::UNKNOWN);
@@ -1454,7 +1483,8 @@ TEST_F(QuicServerTransportTest, RecvStopSendingFrameAfterReset) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
 
   StopSendingFrame stopSendingFrame1(
       streamId1, GenericApplicationErrorCode::UNKNOWN);
@@ -1483,7 +1513,8 @@ TEST_F(QuicServerTransportTest, StopSendingLoss) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      server->getConn().ackStates.appDataAckState.largestAckedByPeer);
+      server->getConn().ackStates.appDataAckState.largestAckedByPeer,
+      QuicVersion::MVFST);
   StopSendingFrame stopSendingFrame(
       streamId, GenericApplicationErrorCode::UNKNOWN);
   ASSERT_TRUE(builder.canBuildPacket());
@@ -1512,7 +1543,8 @@ TEST_F(QuicServerTransportTest, StopSendingLossAfterStreamClosed) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      server->getConn().ackStates.appDataAckState.largestAckedByPeer);
+      server->getConn().ackStates.appDataAckState.largestAckedByPeer,
+      QuicVersion::MVFST);
   StopSendingFrame stopSendingFrame(
       streamId, GenericApplicationErrorCode::UNKNOWN);
   ASSERT_TRUE(builder.canBuildPacket());
@@ -1675,7 +1707,8 @@ TEST_F(QuicServerTransportTest, ReceiveConnectionClose) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
   std::string errMsg = "Stand clear of the closing doors, please";
   ConnectionCloseFrame connClose(TransportErrorCode::NO_ERROR, errMsg);
   writeFrame(std::move(connClose), builder);
@@ -1705,7 +1738,8 @@ TEST_F(QuicServerTransportTest, ReceiveApplicationClose) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
   std::string errMsg = "Stand clear of the closing doors, please";
   ApplicationCloseFrame appClose(GenericApplicationErrorCode::UNKNOWN, errMsg);
   writeFrame(std::move(appClose), builder);
@@ -1731,6 +1765,8 @@ TEST_F(QuicServerTransportTest, ReceiveApplicationClose) {
 }
 
 TEST_F(QuicServerTransportTest, ReceiveConnectionCloseTwice) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  server->getNonConstConn().qLogger = qLogger;
   ShortHeader header(
       ProtectionType::KeyPhaseZero,
       *server->getConn().serverConnectionId,
@@ -1738,7 +1774,8 @@ TEST_F(QuicServerTransportTest, ReceiveConnectionCloseTwice) {
   RegularQuicPacketBuilder builder(
       server->getConn().udpSendPacketLen,
       std::move(header),
-      0 /* largestAcked */);
+      0 /* largestAcked */,
+      QuicVersion::MVFST);
   std::string errMsg = "Mind the gap";
   ConnectionCloseFrame connClose(TransportErrorCode::NO_ERROR, errMsg);
   writeFrame(std::move(connClose), builder);
@@ -1762,6 +1799,16 @@ TEST_F(QuicServerTransportTest, ReceiveConnectionCloseTwice) {
   deliverDataWithoutErrorCheck(packetToBuf(packet));
   EXPECT_FALSE(verifyFramePresent<ConnectionCloseFrame>(
       serverWrites, *makeClientEncryptedCodec()));
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 29);
+  EXPECT_EQ(
+      event->dropReason,
+      QuicTransportStatsCallback::toString(
+          PacketDropReason::SERVER_STATE_CLOSED));
 }
 
 TEST_F(QuicServerTransportTest, CloseTransportWontUnbound) {
@@ -1859,6 +1906,8 @@ TEST_F(
 }
 
 TEST_F(QuicServerTransportTest, ReceiveProbingPacketFromChangedPeerAddress) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  server->getNonConstConn().qLogger = qLogger;
   server->getNonConstConn().transportSettings.disableMigration = false;
 
   ShortHeader header(
@@ -1885,6 +1934,17 @@ TEST_F(QuicServerTransportTest, ReceiveProbingPacketFromChangedPeerAddress) {
   EXPECT_EQ(
       server->getConn().localConnectionError->second,
       "Probing not supported yet");
+
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 29);
+  EXPECT_EQ(
+      event->dropReason,
+      QuicTransportStatsCallback::toString(
+          PacketDropReason::PEER_ADDRESS_CHANGE));
 }
 
 TEST_F(QuicServerTransportTest, ReceiveReorderedDataFromChangedPeerAddress) {
@@ -2126,6 +2186,8 @@ TEST_F(QuicServerTransportTest, ReceivePathResponseFromDifferentPeerAddress) {
 }
 
 TEST_F(QuicServerTransportTest, TooManyMigrations) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  server->getNonConstConn().qLogger = qLogger;
   server->getNonConstConn().transportSettings.disableMigration = false;
   auto data = IOBuf::copyBuffer("bad data");
   auto packetData = packetToBuf(createStreamPacket(
@@ -2152,6 +2214,16 @@ TEST_F(QuicServerTransportTest, TooManyMigrations) {
   EXPECT_EQ(
       server->getConn().localConnectionError->second, "Too many migrations");
   EXPECT_TRUE(server->isClosed());
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 0);
+  EXPECT_EQ(
+      event->dropReason,
+      QuicTransportStatsCallback::toString(
+          PacketDropReason::PEER_ADDRESS_CHANGE));
 }
 
 TEST_F(QuicServerTransportTest, MigrateToValidatedPeer) {
@@ -2657,6 +2729,8 @@ TEST_F(QuicUnencryptedServerTransportTest, TestUnencryptedStream) {
 }
 
 TEST_F(QuicUnencryptedServerTransportTest, TestUnencryptedAck) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  server->getNonConstConn().qLogger = qLogger;
   QuicFizzFactory fizzFactory;
   IntervalSet<PacketNum> acks = {{1, 2}};
   auto expected = IOBuf::copyBuffer("hello");
@@ -2678,6 +2752,28 @@ TEST_F(QuicUnencryptedServerTransportTest, TestUnencryptedAck) {
       *getInitialHeaderCipher(),
       nextPacketNum);
   EXPECT_NO_THROW(deliverData(std::move(packet)));
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 3);
+
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 45);
+  EXPECT_EQ(event->dropReason, kCipherUnavailable.str());
+
+  auto tmp2 = std::move(qLogger->logs[indices[1]]);
+  auto event2 = dynamic_cast<QLogPacketDropEvent*>(tmp2.get());
+  EXPECT_EQ(event2->packetSize, 45);
+  EXPECT_EQ(
+      event2->dropReason,
+      QuicTransportStatsCallback::toString(PacketDropReason::PARSE_ERROR));
+
+  auto tmp3 = std::move(qLogger->logs[indices[2]]);
+  auto event3 = dynamic_cast<QLogPacketDropEvent*>(tmp3.get());
+  EXPECT_EQ(event3->packetSize, 16);
+  EXPECT_EQ(
+      event3->dropReason,
+      QuicTransportStatsCallback::toString(PacketDropReason::PARSE_ERROR));
 }
 
 TEST_F(QuicUnencryptedServerTransportTest, TestBadPacketProtectionLevel) {
@@ -2694,7 +2790,8 @@ TEST_F(QuicUnencryptedServerTransportTest, TestBadPacketProtectionLevel) {
 TEST_F(QuicUnencryptedServerTransportTest, TestBadCleartextEncryption) {
   QuicFizzFactory fizzFactory;
   PacketNum nextPacket = clientNextInitialPacketNum++;
-  auto aead = getServerInitialCipher(&fizzFactory, *clientConnectionId);
+  auto aead = getServerInitialCipher(
+      &fizzFactory, *clientConnectionId, QuicVersion::MVFST);
   auto packetData = packetToBufCleartext(
       createInitialCryptoPacket(
           *clientConnectionId,
@@ -2771,6 +2868,8 @@ TEST_F(QuicUnencryptedServerTransportTest, TestPendingOneRttData) {
 TEST_F(
     QuicUnencryptedServerTransportTest,
     TestReceiveClientFinishedFromChangedPeerAddress) {
+  auto qLogger = std::make_shared<FileQLogger>();
+  server->getNonConstConn().qLogger = qLogger;
   recvClientHello();
 
   folly::SocketAddress newPeer("100.101.102.103", 23456);
@@ -2785,6 +2884,17 @@ TEST_F(
       server->getConn().localConnectionError->second,
       "Migration not allowed during handshake");
   EXPECT_TRUE(server->isClosed());
+
+  std::vector<int> indices =
+      getQLogEventIndices(QLogEventType::PacketDrop, qLogger);
+  EXPECT_EQ(indices.size(), 1);
+  auto tmp = std::move(qLogger->logs[indices[0]]);
+  auto event = dynamic_cast<QLogPacketDropEvent*>(tmp.get());
+  EXPECT_EQ(event->packetSize, 44);
+  EXPECT_EQ(
+      event->dropReason,
+      QuicTransportStatsCallback::toString(
+          PacketDropReason::PEER_ADDRESS_CHANGE));
 }
 
 TEST_F(
@@ -3212,10 +3322,10 @@ class QuicServerTransportHandshakeTest
   }
 
   void expectWriteNewSessionTicket() override {
-    std::string qpackToken("QPACK params");
-    EXPECT_CALL(connCallback, serializeEarlyDataAppParams())
-        .WillOnce(
-            Invoke([=]() { return folly::IOBuf::copyBuffer(qpackToken); }));
+    std::string appParams("APP params");
+    server->setEarlyDataAppParamsFunctions(
+        [](const folly::Optional<std::string>&, const Buf&) { return false; },
+        [=]() -> Buf { return folly::IOBuf::copyBuffer(appParams); });
     EXPECT_CALL(*getFakeHandshakeLayer(), writeNewSessionTicket(_))
         .WillOnce(Invoke([=](const AppToken& appToken) {
           auto& params = appToken.transportParams.parameters;
@@ -3273,7 +3383,7 @@ class QuicServerTransportHandshakeTest
               appToken.sourceAddresses, ContainerEq(expectedSourceToken_));
 
           EXPECT_TRUE(folly::IOBufEqualTo()(
-              appToken.appParams, folly::IOBuf::copyBuffer(qpackToken)));
+              appToken.appParams, folly::IOBuf::copyBuffer(appParams)));
         }));
   }
 

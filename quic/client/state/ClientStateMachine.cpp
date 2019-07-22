@@ -23,6 +23,7 @@ std::unique_ptr<QuicClientConnectionState> undoAllClientStateCommon(
   // Create a new connection state and copy over properties that don't change
   // across stateless retry.
   auto newConn = std::make_unique<QuicClientConnectionState>();
+  newConn->qLogger = conn->qLogger;
   newConn->clientConnectionId = conn->clientConnectionId;
   newConn->initialDestinationConnectionId =
       conn->initialDestinationConnectionId;
@@ -44,8 +45,8 @@ std::unique_ptr<QuicClientConnectionState> undoAllClientStateCommon(
   newConn->initialWriteCipher = std::move(conn->initialWriteCipher);
   newConn->readCodec = std::make_unique<QuicReadCodec>(QuicNodeType::Client);
   newConn->readCodec->setClientConnectionId(*conn->clientConnectionId);
-  newConn->readCodec->setCodecParameters(
-      CodecParameters(conn->peerAckDelayExponent));
+  newConn->readCodec->setCodecParameters(CodecParameters(
+      conn->peerAckDelayExponent, conn->originalVersion.value()));
   return newConn;
 }
 

@@ -13,6 +13,7 @@
 #include <quic/QuicConstants.h>
 #include <quic/common/TimeUtil.h>
 #include <quic/congestion_control/CongestionControlFunctions.h>
+#include <quic/logging/QLoggerConstants.h>
 #include <quic/logging/QuicLogger.h>
 
 using namespace std::chrono_literals;
@@ -97,7 +98,14 @@ void BbrCongestionController::onPacketLoss(const LossEvent& loss) {
 
   if (loss.persistentCongestion) {
     recoveryWindow_ = conn_.udpSendPacketLen * kMinCwndInMssForBbr;
-
+    if (conn_.qLogger) {
+      conn_.qLogger->addCongestionMetricUpdate(
+          inflightBytes_,
+          getCongestionWindow(),
+          kPersistentCongestion.str(),
+          bbrStateToString(state_),
+          bbrRecoveryStateToString(recoveryState_));
+    }
     QUIC_TRACE(
         bbr_persistent_congestion,
         conn_,
@@ -220,7 +228,14 @@ void BbrCongestionController::onPacketAcked(
 
   updateCwnd(ack.ackedBytes, excessiveBytes);
   updatePacing();
-
+  if (conn_.qLogger) {
+    conn_.qLogger->addCongestionMetricUpdate(
+        inflightBytes_,
+        getCongestionWindow(),
+        kCongestionPacketAck.str(),
+        bbrStateToString(state_),
+        bbrRecoveryStateToString(recoveryState_));
+  }
   QUIC_TRACE(
       bbr_ack,
       conn_,
@@ -260,6 +275,10 @@ void BbrCongestionController::updatePacing() noexcept {
   // TODO: slower pacing if we are in STARTUP and loss has happened
   std::tie(pacingInterval_, pacingBurstSize_) = calculatePacingRate(
       conn_, pacingWindow_, kMinCwndInMssForBbr, minimalPacingInterval_, mrtt);
+
+  if (conn_.transportSettings.pacingEnabled && conn_.qLogger) {
+    conn_.qLogger->addPacingMetricUpdate(pacingBurstSize_, pacingInterval_);
+  }
 }
 
 void BbrCongestionController::handleAckInProbeBw(
@@ -490,6 +509,9 @@ void BbrCongestionController::updateCwnd(
 void BbrCongestionController::setAppIdle(
     bool idle,
     TimePoint /* eventTime */) noexcept {
+  if (conn_.qLogger) {
+    conn_.qLogger->addAppIdleUpdate(kAppIdle.str(), idle);
+  }
   QUIC_TRACE(bbr_appidle, conn_, idle);
   /*
    * No-op for bbr.

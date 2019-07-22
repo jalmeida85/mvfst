@@ -12,6 +12,7 @@
 #include <quic/codec/Types.h>
 #include <quic/common/TimeUtil.h>
 #include <quic/flowcontrol/QuicFlowController.h>
+#include <quic/logging/QLoggerConstants.h>
 #include <quic/logging/QuicLogger.h>
 #include <quic/state/QuicStateFunctions.h>
 #include <quic/state/SimpleFrameFunctions.h>
@@ -24,7 +25,7 @@ namespace quic {
 
 // Forward-declaration
 bool hasAckDataToWrite(const QuicConnectionStateBase& conn);
-bool hasNonAckDataToWrite(const QuicConnectionStateBase& conn);
+WriteDataReason hasNonAckDataToWrite(const QuicConnectionStateBase& conn);
 
 std::chrono::microseconds calculatePTO(const QuicConnectionStateBase& conn);
 
@@ -138,7 +139,8 @@ void setLossDetectionAlarm(QuicConnectionStateBase& conn, Timeout& timeout) {
    * in the buffers which is unsent or known to be lost. We should set a timer
    * in this case to be able to send this data on the next PTO.
    */
-  bool hasDataToWrite = hasAckDataToWrite(conn) || hasNonAckDataToWrite(conn);
+  bool hasDataToWrite = hasAckDataToWrite(conn) ||
+      (hasNonAckDataToWrite(conn) != WriteDataReason::NO_WRITE);
   auto totalPacketsOutstanding = conn.outstandingPackets.size();
   if (totalPacketsOutstanding == conn.outstandingPureAckPacketsCount) {
     VLOG(10) << __func__ << " unset alarm pure ack only"
@@ -293,6 +295,12 @@ folly::Optional<CongestionController::LossEvent> detectLossPackets(
   }
   if (lossEvent.largestLostPacketNum.hasValue()) {
     DCHECK(lossEvent.largestLostSentTime && lossEvent.smallestLostSentTime);
+    if (conn.qLogger) {
+      conn.qLogger->addPacketsLost(
+          lossEvent.largestLostPacketNum.value(),
+          lossEvent.lostBytes,
+          lossEvent.lostPackets);
+    }
     QUIC_TRACE(
         packets_lost,
         conn,
@@ -318,6 +326,13 @@ void onHandshakeAlarm(
   // Alternatively we can experiment with only retransmit them without marking
   // loss
   VLOG(10) << __func__ << " " << conn;
+  if (conn.qLogger) {
+    conn.qLogger->addLossAlarm(
+        conn.lossState.largestSent,
+        conn.lossState.handshakeAlarmCount,
+        (uint64_t)conn.outstandingPackets.size(),
+        kHandshakeAlarm.str());
+  }
   QUIC_TRACE(
       handshake_alarm,
       conn,

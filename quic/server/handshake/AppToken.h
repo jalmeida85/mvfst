@@ -33,11 +33,11 @@ namespace quic {
 struct AppToken {
   TicketTransportParameters transportParams;
   std::vector<folly::IPAddress> sourceAddresses;
+  folly::Optional<QuicVersion> version;
   Buf appParams;
 };
 
 TicketTransportParameters createTicketTransportParameters(
-    QuicVersion negotiatedVersion,
     uint64_t idleTimeout,
     uint64_t maxRecvPacketSize,
     uint64_t initialMaxData,
@@ -52,7 +52,7 @@ fizz::Buf encodeAppToken(const AppToken& appToken);
 folly::Optional<AppToken> decodeAppToken(const folly::IOBuf& buf);
 
 class FailingAppTokenValidator : public fizz::server::AppTokenValidator {
-  bool validate(const fizz::server::ResumptionState&) const override {
+  bool validate(const fizz::server::ResumptionState&) override {
     return false;
   }
 };

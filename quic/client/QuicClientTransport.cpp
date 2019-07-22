@@ -15,6 +15,7 @@
 #include <quic/client/state/ClientStateMachine.h>
 #include <quic/flowcontrol/QuicFlowController.h>
 #include <quic/happyeyeballs/QuicHappyEyeballsFunctions.h>
+#include <quic/logging/QLoggerConstants.h>
 #include <quic/loss/QuicLossFunctions.h>
 #include <quic/state/AckHandlers.h>
 #include <quic/state/QuicPacingFunctions.h>
@@ -41,8 +42,8 @@ QuicClientTransport::QuicClientTransport(
   clientConn_->initialDestinationConnectionId = ConnectionId(connIdData);
   conn_->readCodec = std::make_unique<QuicReadCodec>(QuicNodeType::Client);
   conn_->readCodec->setClientConnectionId(*conn_->clientConnectionId);
-  conn_->readCodec->setCodecParameters(
-      CodecParameters(conn_->peerAckDelayExponent));
+  conn_->readCodec->setCodecParameters(CodecParameters(
+      conn_->peerAckDelayExponent, conn_->originalVersion.value()));
   // TODO: generate this once we can generate the packet sequence number
   // correctly.
   // conn_->nextSequenceNum = folly::Random::secureRandom<PacketNum>();
@@ -113,6 +114,9 @@ void QuicClientTransport::processPacketData(
       },
       [&](auto&) { return false; });
   if (!parseSuccess) {
+    if (conn_->qLogger) {
+      conn_->qLogger->addPacketDrop(packetSize, kParse.str());
+    }
     QUIC_TRACE(packet_drop, *conn_, "parse");
     return;
   }
@@ -140,6 +144,9 @@ void QuicClientTransport::processPacketData(
   auto regularOptional = boost::get<RegularQuicPacket>(&packet);
   if (!regularOptional) {
     VLOG(4) << "Dropping non-regular packet " << *conn_;
+    if (conn_->qLogger) {
+      conn_->qLogger->addPacketDrop(packetSize, kNonRegular.str());
+    }
     QUIC_TRACE(packet_drop, *conn_, "non_regular");
     return;
   }
@@ -193,6 +200,11 @@ void QuicClientTransport::processPacketData(
     conn_ = std::move(tempConn);
 
     clientConn_->retryToken_ = header.getToken()->clone();
+
+    if (conn_->qLogger) {
+      conn_->qLogger->addPacket(*regularOptional, packetSize);
+    }
+
     startCryptoHandshake();
     return;
   }
@@ -632,6 +644,9 @@ void QuicClientTransport::onReadData(
     // If we are closed, then we shoudn't process new network data.
     // TODO: we might want to process network data if we decide that we should
     // exit draining state early
+    if (conn_->qLogger) {
+      conn_->qLogger->addPacketDrop(0, kAlreadyClosed.str());
+    }
     QUIC_TRACE(packet_drop, *conn_, "already_closed");
     return;
   }
@@ -788,10 +803,11 @@ folly::Optional<QuicCachedPsk> QuicClientTransport::getPsk() {
       conn_->originalVersion) {
     quicCachedPsk->cachedPsk.maxEarlyDataSize = 0;
     removePsk();
-  } else if (!CHECK_NOTNULL(connCallback_)
-                  ->validateEarlyDataAppParams(
-                      quicCachedPsk->cachedPsk.alpn,
-                      folly::IOBuf::copyBuffer(quicCachedPsk->appParams))) {
+  } else if (
+      earlyDataAppParamsValidator_ &&
+      !earlyDataAppParamsValidator_(
+          quicCachedPsk->cachedPsk.alpn,
+          folly::IOBuf::copyBuffer(quicCachedPsk->appParams))) {
     quicCachedPsk->cachedPsk.maxEarlyDataSize = 0;
     // Do not remove psk here, will let application decide
   }
@@ -820,14 +836,15 @@ void QuicClientTransport::startCryptoHandshake() {
   }
 
   QuicFizzFactory fizzFactory;
+  auto version = conn_->originalVersion.value();
   conn_->initialWriteCipher = getClientInitialCipher(
-      &fizzFactory, *clientConn_->initialDestinationConnectionId);
+      &fizzFactory, *clientConn_->initialDestinationConnectionId, version);
   conn_->readCodec->setInitialReadCipher(getServerInitialCipher(
-      &fizzFactory, *clientConn_->initialDestinationConnectionId));
+      &fizzFactory, *clientConn_->initialDestinationConnectionId, version));
   conn_->readCodec->setInitialHeaderCipher(makeServerInitialHeaderCipher(
-      &fizzFactory, *clientConn_->initialDestinationConnectionId));
+      &fizzFactory, *clientConn_->initialDestinationConnectionId, version));
   conn_->initialHeaderCipher = makeClientInitialHeaderCipher(
-      &fizzFactory, *clientConn_->initialDestinationConnectionId);
+      &fizzFactory, *clientConn_->initialDestinationConnectionId, version);
 
   // Add partial reliability parameter to customTransportParameters_.
   setPartialReliabilityTransportParameter();
@@ -937,9 +954,11 @@ void QuicClientTransport::onNewCachedPsk(
   quicCachedPsk.transportParams.initialMaxStreamsUni =
       clientConn_->peerAdvertisedInitialMaxStreamsUni;
 
-  auto appParams = CHECK_NOTNULL(connCallback_)->serializeEarlyDataAppParams();
-  if (appParams) {
-    quicCachedPsk.appParams = appParams->moveToFbString().toStdString();
+  if (earlyDataAppParamsGetter_) {
+    auto appParams = earlyDataAppParamsGetter_();
+    if (appParams) {
+      quicCachedPsk.appParams = appParams->moveToFbString().toStdString();
+    }
   }
 
   pskCache_->putPsk(*hostname_, std::move(quicCachedPsk));
@@ -1000,11 +1019,17 @@ void QuicClientTransport::onDataAvailable(
   Buf data = std::move(readBuffer_);
   if (truncated) {
     // This is an error, drop the packet.
+    if (conn_->qLogger) {
+      conn_->qLogger->addPacketDrop(len, kUdpTruncated.str());
+    }
     QUIC_TRACE(packet_drop, *conn_, "udp_truncated");
     return;
   }
   data->append(len);
   QUIC_TRACE(udp_recvd, *conn_, (uint64_t)len);
+  if (conn_->qLogger) {
+    conn_->qLogger->addDatagramReceived(len);
+  }
   NetworkData networkData(std::move(data), packetReceiveTime);
   onNetworkData(server, std::move(networkData));
 }

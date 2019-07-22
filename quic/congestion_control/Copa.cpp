@@ -9,6 +9,8 @@
 #include <quic/congestion_control/Copa.h>
 #include <quic/common/TimeUtil.h>
 #include <quic/congestion_control/CongestionControlFunctions.h>
+#include <quic/logging/QLoggerConstants.h>
+#include <quic/logging/QuicLogger.h>
 
 namespace quic {
 
@@ -36,6 +38,10 @@ void Copa::onRemoveBytesFromInflight(uint64_t bytes) {
   VLOG(10) << __func__ << " writable=" << getWritableBytes()
            << " cwnd=" << cwndBytes_ << " inflight=" << bytesInFlight_ << " "
            << conn_;
+  if (conn_.qLogger) {
+    conn_.qLogger->addCongestionMetricUpdate(
+        bytesInFlight_, getCongestionWindow(), kRemoveInflight.str());
+  }
 }
 
 void Copa::onPacketSent(const OutstandingPacket& packet) {
@@ -49,6 +55,10 @@ void Copa::onPacketSent(const OutstandingPacket& packet) {
                   packet.packet.header,
                   [](auto& h) { return h.getPacketSequenceNum(); })
            << " " << conn_;
+  if (conn_.qLogger) {
+    conn_.qLogger->addCongestionMetricUpdate(
+        bytesInFlight_, getCongestionWindow(), kCongestionPacketSent.str());
+  }
 }
 
 /**
@@ -120,9 +130,11 @@ void Copa::onPacketAckOrLoss(
     folly::Optional<LossEvent> loss) {
   if (loss) {
     onPacketLoss(*loss);
+    QUIC_TRACE(copa_loss, conn_, cwndBytes_, bytesInFlight_);
   }
   if (ack && ack->largestAckedPacket.hasValue()) {
     onPacketAcked(*ack);
+    QUIC_TRACE(copa_ack, conn_, cwndBytes_, bytesInFlight_);
   }
 }
 
@@ -153,6 +165,11 @@ void Copa::onPacketAcked(const AckEvent& ack) {
            << conn_.flowControlState.sumCurStreamBufferLen
            << " packetsRetransmitted=" << conn_.lossState.rtxCount << " "
            << conn_;
+
+  if (conn_.qLogger) {
+    conn_.qLogger->addCongestionMetricUpdate(
+        bytesInFlight_, getCongestionWindow(), kCongestionPacketAck.str());
+  }
 
   auto delayInMicroSec =
       duration_cast<microseconds>(conn_.lossState.lrtt - rttMin).count();
@@ -252,6 +269,10 @@ void Copa::onPacketLoss(const LossEvent& loss) {
   VLOG(10) << __func__ << " lostBytes=" << loss.lostBytes
            << " lostPackets=" << loss.lostPackets << " cwnd=" << cwndBytes_
            << " inflight=" << bytesInFlight_ << " " << conn_;
+  if (conn_.qLogger) {
+    conn_.qLogger->addCongestionMetricUpdate(
+        bytesInFlight_, getCongestionWindow(), kCongestionPacketLoss.str());
+  }
   DCHECK(loss.largestLostPacketNum.hasValue());
   subtractAndCheckUnderflow(bytesInFlight_, loss.lostBytes);
   if (loss.persistentCongestion) {
@@ -259,6 +280,10 @@ void Copa::onPacketLoss(const LossEvent& loss) {
     VLOG(10) << __func__ << " writable=" << getWritableBytes()
              << " cwnd=" << cwndBytes_ << " inflight=" << bytesInFlight_ << " "
              << conn_;
+    if (conn_.qLogger) {
+      conn_.qLogger->addCongestionMetricUpdate(
+          bytesInFlight_, getCongestionWindow(), kPersistentCongestion.str());
+    }
     cwndBytes_ = conn_.transportSettings.minCwndInMss * conn_.udpSendPacketLen;
     updatePacing();
   }
@@ -299,6 +324,9 @@ void Copa::updatePacing() noexcept {
   if (conn_.transportSettings.pacingEnabled) {
     VLOG(10) << "updatePacing pacingInterval_ = " << pacingInterval_.count()
              << ", pacingBurstSize_ " << pacingBurstSize_ << " " << conn_;
+    if (conn_.qLogger) {
+      conn_.qLogger->addPacingMetricUpdate(pacingBurstSize_, pacingInterval_);
+    }
   }
 }
 

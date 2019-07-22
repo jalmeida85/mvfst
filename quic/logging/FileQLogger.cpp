@@ -94,6 +94,71 @@ void FileQLogger::addCongestionMetricUpdate(
       refTime));
 }
 
+void FileQLogger::addPacingMetricUpdate(
+    uint64_t pacingBurstSizeIn,
+    std::chrono::microseconds pacingIntervalIn) {
+  auto refTime = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - refTimePoint);
+
+  logs.push_back(std::make_unique<quic::QLogPacingMetricUpdateEvent>(
+      pacingBurstSizeIn, pacingIntervalIn, refTime));
+}
+
+void FileQLogger::addAppIdleUpdate(std::string idleEvent, bool idle) {
+  auto refTime = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - refTimePoint);
+
+  logs.push_back(std::make_unique<quic::QLogAppIdleUpdateEvent>(
+      std::move(idleEvent), idle, refTime));
+}
+
+void FileQLogger::addPacketDrop(size_t packetSize, std::string dropReason) {
+  auto refTime = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - refTimePoint);
+
+  logs.push_back(std::make_unique<quic::QLogPacketDropEvent>(
+      packetSize, std::move(dropReason), refTime));
+}
+
+void FileQLogger::addDatagramReceived(uint64_t dataLen) {
+  auto refTime = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - refTimePoint);
+
+  logs.push_back(
+      std::make_unique<quic::QLogDatagramReceivedEvent>(dataLen, refTime));
+}
+
+void FileQLogger::addLossAlarm(
+    PacketNum largestSent,
+    uint64_t alarmCount,
+    uint64_t outstandingPackets,
+    std::string type) {
+  auto refTime = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - refTimePoint);
+
+  logs.push_back(std::make_unique<quic::QLogLossAlarmEvent>(
+      largestSent, alarmCount, outstandingPackets, std::move(type), refTime));
+}
+
+void FileQLogger::addPacketsLost(
+    PacketNum largestLostPacketNum,
+    uint64_t lostBytes,
+    uint64_t lostPackets) {
+  auto refTime = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - refTimePoint);
+
+  logs.push_back(std::make_unique<quic::QLogPacketsLostEvent>(
+      largestLostPacketNum, lostBytes, lostPackets, refTime));
+}
+
+void FileQLogger::addTransportStateUpdate(std::string update) {
+  auto refTime = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - refTimePoint);
+
+  logs.push_back(std::make_unique<quic::QLogTransportStateUpdateEvent>(
+      std::move(update), refTime));
+}
+
 folly::dynamic FileQLogger::toDynamic() const {
   folly::dynamic d = folly::dynamic::object;
   d["traces"] = folly::dynamic::array();

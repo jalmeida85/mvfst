@@ -51,8 +51,24 @@ class FileQLogger : public QLogger {
       uint64_t bytesInFlight,
       uint64_t currentCwnd,
       std::string congestionEvent,
-      std::string state,
+      std::string state = "",
       std::string recoveryState = "") override;
+  void addPacingMetricUpdate(
+      uint64_t pacingBurstSizeIn,
+      std::chrono::microseconds pacingIntervalIn) override;
+  void addAppIdleUpdate(std::string idleEvent, bool idle) override;
+  void addPacketDrop(size_t packetSize, std::string dropReasonIn) override;
+  void addDatagramReceived(uint64_t dataLen) override;
+  void addLossAlarm(
+      PacketNum largestSent,
+      uint64_t alarmCount,
+      uint64_t outstandingPackets,
+      std::string type) override;
+  void addPacketsLost(
+      PacketNum largestLostPacketNum,
+      uint64_t lostBytes,
+      uint64_t lostPackets) override;
+  void addTransportStateUpdate(std::string update) override;
   void outputLogsToFile(const std::string& path, bool prettyJson);
   folly::dynamic toDynamic() const;
 };

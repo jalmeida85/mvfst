@@ -214,8 +214,12 @@ class QuicTransportBase : public QuicSocket {
   // TODO: move only to the server api.
   virtual void setSupportedVersions(const std::vector<QuicVersion>& versions);
 
-  virtual void setConnectionCallback(
-      ConnectionCallback* callback) override final;
+  void setConnectionCallback(ConnectionCallback* callback) final;
+
+  void setEarlyDataAppParamsFunctions(
+      folly::Function<bool(const folly::Optional<std::string>&, const Buf&)>
+          validator,
+      folly::Function<Buf()> getter) final;
 
   bool isDetachable() override;
 
@@ -441,6 +445,10 @@ class QuicTransportBase : public QuicSocket {
     conn_->qLogger = std::move(qLogger);
   }
 
+  void setLoopDetectorCallback(std::shared_ptr<LoopDetectorCallback> callback) {
+    conn_->loopDetectorCallback = std::move(callback);
+  }
+
   virtual void cancelAllAppCallbacks(
       std::pair<QuicErrorCode, std::string> error) noexcept;
 
@@ -583,6 +591,11 @@ class QuicTransportBase : public QuicSocket {
   folly::SocketAddress localFallbackAddress;
   // CongestionController factory
   std::shared_ptr<CongestionControllerFactory> ccFactory_{nullptr};
+
+  folly::Function<bool(const folly::Optional<std::string>&, const Buf&)>
+      earlyDataAppParamsValidator_;
+
+  folly::Function<Buf()> earlyDataAppParamsGetter_;
 };
 
 std::ostream& operator<<(std::ostream& os, const QuicTransportBase& qt);

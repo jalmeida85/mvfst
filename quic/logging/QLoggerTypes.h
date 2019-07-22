@@ -298,6 +298,13 @@ enum class QLogEventType : uint32_t {
   ConnectionClose,
   TransportSummary,
   CongestionMetricUpdate,
+  PacingMetricUpdate,
+  AppIdleUpdate,
+  PacketDrop,
+  DatagramReceived,
+  LossAlarm,
+  PacketsLost,
+  TransportStateUpdate,
 };
 
 std::string toString(QLogEventType type);
@@ -396,6 +403,96 @@ class QLogCongestionMetricUpdateEvent : public QLogEvent {
   std::string state;
   std::string recoveryState;
 
+  folly::dynamic toDynamic() const override;
+};
+
+class QLogPacingMetricUpdateEvent : public QLogEvent {
+ public:
+  QLogPacingMetricUpdateEvent(
+      uint64_t pacingBurstSize,
+      std::chrono::microseconds pacingInterval,
+      std::chrono::microseconds refTime);
+  ~QLogPacingMetricUpdateEvent() override = default;
+  uint64_t pacingBurstSize;
+  std::chrono::microseconds pacingInterval;
+
+  folly::dynamic toDynamic() const override;
+};
+
+class QLogAppIdleUpdateEvent : public QLogEvent {
+ public:
+  QLogAppIdleUpdateEvent(
+      std::string idleEvent,
+      bool idle,
+      std::chrono::microseconds refTime);
+  ~QLogAppIdleUpdateEvent() override = default;
+  std::string idleEvent;
+  bool idle;
+
+  folly::dynamic toDynamic() const override;
+};
+
+class QLogPacketDropEvent : public QLogEvent {
+ public:
+  QLogPacketDropEvent(
+      size_t packetSize,
+      std::string dropReason,
+      std::chrono::microseconds refTime);
+  ~QLogPacketDropEvent() override = default;
+  size_t packetSize;
+  std::string dropReason;
+
+  folly::dynamic toDynamic() const override;
+};
+
+class QLogDatagramReceivedEvent : public QLogEvent {
+ public:
+  QLogDatagramReceivedEvent(
+      uint64_t dataLen,
+      std::chrono::microseconds refTime);
+  ~QLogDatagramReceivedEvent() override = default;
+  uint64_t dataLen;
+
+  folly::dynamic toDynamic() const override;
+};
+
+class QLogLossAlarmEvent : public QLogEvent {
+ public:
+  QLogLossAlarmEvent(
+      PacketNum largestSent,
+      uint64_t alarmCount,
+      uint64_t outstandingPackets,
+      std::string type,
+      std::chrono::microseconds refTime);
+  ~QLogLossAlarmEvent() override = default;
+  PacketNum largestSent;
+  uint64_t alarmCount;
+  uint64_t outstandingPackets;
+  std::string type;
+  folly::dynamic toDynamic() const override;
+};
+
+class QLogPacketsLostEvent : public QLogEvent {
+ public:
+  QLogPacketsLostEvent(
+      PacketNum largestLostPacketNum,
+      uint64_t lostBytes,
+      uint64_t lostPackets,
+      std::chrono::microseconds refTime);
+  ~QLogPacketsLostEvent() override = default;
+  PacketNum largestLostPacketNum;
+  uint64_t lostBytes;
+  uint64_t lostPackets;
+  folly::dynamic toDynamic() const override;
+};
+
+class QLogTransportStateUpdateEvent : public QLogEvent {
+ public:
+  QLogTransportStateUpdateEvent(
+      std::string update,
+      std::chrono::microseconds refTime);
+  ~QLogTransportStateUpdateEvent() override = default;
+  std::string update;
   folly::dynamic toDynamic() const override;
 };
 
